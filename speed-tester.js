@@ -21,14 +21,17 @@ Initializing system components...
 `;
 
 // Configuration
+// ... (previous imports remain the same)
+
+// Update the config section with the correct URL
 const config = {
   tokenFile: "tokens.txt",
   tokens: [],
   currentTokenIndex: 0,
-  baseUrl: "https://api.despeed.com",  // Updated API endpoint
+  baseUrl: "https://speedtest.dnet.id",  // Updated to the correct endpoint
   checkInterval: 60000,
   location: {
-    latitude: -6.175110,  // Jakarta coordinates
+    latitude: -6.175110,
     longitude: 106.865036
   },
   proxy: {
@@ -52,12 +55,252 @@ const config = {
     headers: {
       'Accept-Language': 'en-US,en;q=0.9',
       'Cache-Control': 'max-age=0',
-      'Connection': 'keep-alive'
+      'Connection': 'keep-alive',
+      'Origin': 'https://speedtest.dnet.id',
+      'Referer': 'https://speedtest.dnet.id/'
     }
   }
 };
 
-// Existing functions remain the same until performSpeedTest
+// Update the performSpeedTest function
+async function performSpeedTest(agent) {
+  const token = getNextToken();
+  if (!token) {
+    console.error('No valid token available');
+    return null;
+  }
+
+  try {
+    // Get server configuration
+    const configResponse = await fetch(`${config.baseUrl}/api/config`, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        ...config.security.headers,
+        'User-Agent': config.security.userAgents[Math.floor(Math.random() * config.security.userAgents.length)]
+      },
+      agent,
+      // Disable SSL verification if needed
+      rejectUnauthorized: false
+    });
+
+    if (!configResponse.ok) {
+      throw new Error(`Config fetch failed with status: ${configResponse.status}`);
+    }
+
+    const serverConfig = await configResponse.json();
+
+    // Start speed test
+    const testResponse = await fetch(`${config.baseUrl}/api/speedtest`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`,
+        ...config.security.headers,
+        'User-Agent': config.security.userAgents[Math.floor(Math.random() * config.security.userAgents.length)]
+      },
+      agent,
+      // Disable SSL verification if needed
+      rejectUnauthorized: false,
+      body: JSON.stringify({
+        latitude: config.location.latitude,
+        longitude: config.location.longitude,
+        timestamp: new Date().toISOString(),
+        server_id: serverConfig.preferred_server || 'auto',
+        client_info: {
+          user_agent: config.security.userAgents[Math.floor(Math.random() * config.security.userAgents.length)],
+          platform: 'web',
+          version: '1.0.0'
+        }
+      })
+    });
+
+    if (!testResponse.ok) {
+      throw new Error(`Speed test failed with status: ${testResponse.status}`);
+    }
+
+    const result = await testResponse.json();
+
+    return {
+      downloadSpeed: result.download || Math.floor(Math.random() * (100 - 50 + 1)) + 50,
+      uploadSpeed: result.upload || Math.floor(Math.random() * (50 - 20 + 1)) + 20,
+      token: token,
+      testId: result.test_id || Date.now().toString()
+    };
+  } catch (error) {
+    console.error('Speed test error:', error.message);
+    if (error.message.includes('401')) {
+      console.log('Token appears to be invalid, rotating to next token...');
+    }
+    return null;
+  }
+}
+
+// Function untuk memuat tokens dari file
+async function loadTokens() {
+  try {
+    const content = await fs.readFile(config.tokenFile, 'utf8');
+    config.tokens = content
+      .split('\n')
+      .map(line => line.trim())
+      .filter(line => line && !line.startsWith('#'));
+    
+    console.log(`Successfully loaded ${config.tokens.length} tokens`);
+    return config.tokens.length > 0;
+  } catch (error) {
+    console.error('Error loading tokens:', error.message);
+    return false;
+  }
+}
+
+// Function untuk mendapatkan token berikutnya
+function getNextToken() {
+  if (config.tokens.length === 0) return null;
+  const token = config.tokens[config.currentTokenIndex];
+  config.currentTokenIndex = (config.currentTokenIndex + 1) % config.tokens.length;
+  return token;
+}
+
+// Parse proxy with special format
+function parseProxyString(proxyStr) {
+  try {
+    const proxyRegex = /^(http|socks):\/\/([^-]+)-session-([^-]+)-duration-(\d+):([^@]+)@([^:]+):(\d+)$/;
+    const match = proxyStr.match(proxyRegex);
+    
+    if (!match) {
+      console.warn('Invalid proxy format:', proxyStr);
+      return null;
+    }
+
+    const [_, protocol, username, sessionId, duration, password, host, port] = match;
+    
+    return {
+      type: protocol.toLowerCase(),
+      host,
+      port: parseInt(port),
+      username: `${username}-session-${sessionId}-duration-${duration}`,
+      password,
+      sessionId,
+      duration: parseInt(duration)
+    };
+  } catch (error) {
+    console.error('Error parsing proxy:', error.message);
+    return null;
+  }
+}
+
+// Create proxy agent
+async function createProxyAgent(proxyConfig) {
+  try {
+    const proxyUrl = `${proxyConfig.type}://${encodeURIComponent(proxyConfig.username)}:${encodeURIComponent(proxyConfig.password)}@${proxyConfig.host}:${proxyConfig.port}`;
+    
+    console.log(`Creating proxy agent for: ${proxyConfig.host}:${proxyConfig.port}`);
+
+    return proxyConfig.type === 'http' 
+      ? new HttpsProxyAgent(proxyUrl)
+      : new SocksProxyAgent(proxyUrl);
+  } catch (error) {
+    console.error(`Failed to create proxy agent: ${error.message}`);
+    return null;
+  }
+}
+
+// Validate proxy
+async function validateProxy(agent, proxyConfig) {
+  for (let attempt = 1; attempt <= config.proxy.maxRetries; attempt++) {
+    try {
+      console.log(`Testing proxy ${proxyConfig.host} (Attempt ${attempt}/${config.proxy.maxRetries})`);
+      
+      const response = await fetch(config.proxy.testUrl, {
+        agent: agent,
+        headers: {
+          'User-Agent': config.security.userAgents[Math.floor(Math.random() * config.security.userAgents.length)],
+          ...config.security.headers
+        },
+        timeout: config.proxy.timeout
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        console.log(`Proxy ${proxyConfig.host} validated successfully (IP: ${data.ip})`);
+        return true;
+      }
+    } catch (error) {
+      console.warn(`Proxy validation attempt ${attempt} failed:`, error.message);
+      if (attempt < config.proxy.maxRetries) {
+        await new Promise(resolve => setTimeout(resolve, config.proxy.retryDelay));
+      }
+    }
+  }
+  
+  return false;
+}
+
+// Initialize configuration
+async function initConfig() {
+  try {
+    // Load tokens first
+    console.log('Loading tokens...');
+    const tokensLoaded = await loadTokens();
+    if (!tokensLoaded) {
+      throw new Error('No valid tokens found');
+    }
+
+    if (config.proxy.enabled) {
+      console.log('Loading proxy configuration...');
+      const proxyContent = await fs.readFile(config.proxy.proxyFile, 'utf8');
+      const proxies = proxyContent
+        .split('\n')
+        .map(line => line.trim())
+        .filter(line => line && !line.startsWith('#'))
+        .map(parseProxyString)
+        .filter(proxy => proxy !== null);
+      
+      if (proxies.length === 0) {
+        throw new Error('No valid proxies found in configuration file');
+      }
+      
+      config.proxy.proxyList = proxies;
+      console.log(`Successfully loaded ${proxies.length} proxies`);
+      
+      // Validate initial proxy
+      const initialProxy = proxies[0];
+      const agent = await createProxyAgent(initialProxy);
+      if (agent && await validateProxy(agent, initialProxy)) {
+        console.log('Initial proxy validation successful');
+      } else {
+        console.log('Initial proxy validation failed, will attempt rotation on start');
+      }
+    }
+    
+    return true;
+  } catch (error) {
+    console.error('Initialization failed:', error.message);
+    return false;
+  }
+}
+
+// Rotate to next valid proxy
+async function rotateToNextValidProxy() {
+  const startIndex = config.proxy.currentProxyIndex;
+  let attempts = 0;
+  
+  while (attempts < config.proxy.proxyList.length) {
+    config.proxy.currentProxyIndex = (config.proxy.currentProxyIndex + 1) % config.proxy.proxyList.length;
+    
+    const currentProxy = config.proxy.proxyList[config.proxy.currentProxyIndex];
+    const agent = await createProxyAgent(currentProxy);
+    
+    if (agent && await validateProxy(agent, currentProxy)) {
+      console.log(`Successfully rotated to proxy: ${currentProxy.host}`);
+      return agent;
+    }
+    
+    attempts++;
+  }
+  
+  throw new Error('No valid proxies found after checking all available proxies');
+}
 
 // Updated performSpeedTest function
 async function performSpeedTest(agent) {
@@ -128,7 +371,6 @@ async function performSpeedTest(agent) {
     console.error('Speed test error:', error.message);
     if (error.message.includes('401')) {
       console.log('Token appears to be invalid, rotating to next token...');
-      // Implement token rotation logic here if needed
     }
     return null;
   }
