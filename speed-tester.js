@@ -62,6 +62,7 @@ const config = {
   }
 };
 
+
 // Update the performSpeedTest function
 async function performSpeedTest(agent) {
   const token = getNextToken();
@@ -303,6 +304,15 @@ async function rotateToNextValidProxy() {
 }
 
 // Updated performSpeedTest function
+function debugLog(message, data = null) {
+  if (config.debug) {
+    console.log(`[DEBUG] ${message}`);
+    if (data) {
+      console.log(JSON.stringify(data, null, 2));
+    }
+  }
+}
+
 async function performSpeedTest(agent) {
   const token = getNextToken();
   if (!token) {
@@ -311,8 +321,11 @@ async function performSpeedTest(agent) {
   }
 
   try {
-    // First, initialize the speed test
-    const initResponse = await fetch(`${config.baseUrl}/v1/speedtest/init`, {
+    debugLog('Starting speed test with token', token.substring(0, 10) + '...');
+
+    // First try to get server list
+    debugLog('Fetching server list');
+    const serverListResponse = await fetch(`${config.baseUrl}${config.apiPath}/servers`, {
       method: 'GET',
       headers: {
         'Authorization': `Bearer ${token}`,
@@ -322,23 +335,20 @@ async function performSpeedTest(agent) {
       agent
     });
 
-    if (!initResponse.ok) {
-      throw new Error(`Speed test initialization failed with status: ${initResponse.status}`);
+    if (!serverListResponse.ok) {
+      throw new Error(`Failed to fetch server list: ${serverListResponse.status}`);
     }
 
-    const initData = await initResponse.json();
-    const testId = initData.testId;
+    const servers = await serverListResponse.json();
+    debugLog('Received server list', servers);
 
-    // Simulate download test
-    const downloadSpeed = Math.floor(Math.random() * (100 - 50 + 1)) + 50; // Random speed between 50-100 Mbps
-    await new Promise(resolve => setTimeout(resolve, 2000)); // Simulate test duration
+    // Select nearest server
+    const selectedServer = servers[0]; // Use first server for now
+    debugLog('Selected server', selectedServer);
 
-    // Simulate upload test
-    const uploadSpeed = Math.floor(Math.random() * (50 - 20 + 1)) + 20; // Random speed between 20-50 Mbps
-    await new Promise(resolve => setTimeout(resolve, 2000)); // Simulate test duration
-
-    // Submit test results
-    const submitResponse = await fetch(`${config.baseUrl}/v1/speedtest/submit`, {
+    // Initialize test
+    debugLog('Initializing speed test');
+    const initResponse = await fetch(`${config.baseUrl}${config.apiPath}/test/init`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -348,35 +358,74 @@ async function performSpeedTest(agent) {
       },
       agent,
       body: JSON.stringify({
-        testId,
-        downloadSpeed,
-        uploadSpeed,
+        server_id: selectedServer.id,
         latitude: config.location.latitude,
-        longitude: config.location.longitude,
+        longitude: config.location.longitude
+      })
+    });
+
+    if (!initResponse.ok) {
+      debugLog('Init response error', await initResponse.text());
+      throw new Error(`Test initialization failed: ${initResponse.status}`);
+    }
+
+    const initData = await initResponse.json();
+    debugLog('Test initialized', initData);
+
+    // Simulate download test
+    debugLog('Starting download test');
+    await new Promise(resolve => setTimeout(resolve, 3000));
+    const downloadSpeed = Math.floor(Math.random() * (100 - 50 + 1)) + 50;
+
+    // Simulate upload test
+    debugLog('Starting upload test');
+    await new Promise(resolve => setTimeout(resolve, 3000));
+    const uploadSpeed = Math.floor(Math.random() * (50 - 20 + 1)) + 20;
+
+    // Submit results
+    debugLog('Submitting test results');
+    const submitResponse = await fetch(`${config.baseUrl}${config.apiPath}/test/submit`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`,
+        ...config.security.headers,
+        'User-Agent': config.security.userAgents[Math.floor(Math.random() * config.security.userAgents.length)]
+      },
+      agent,
+      body: JSON.stringify({
+        test_id: initData.test_id,
+        download_speed: downloadSpeed,
+        upload_speed: uploadSpeed,
+        ping: Math.floor(Math.random() * 50) + 10,
+        jitter: Math.floor(Math.random() * 10) + 1,
         timestamp: new Date().toISOString()
       })
     });
 
     if (!submitResponse.ok) {
-      throw new Error(`Speed test submission failed with status: ${submitResponse.status}`);
+      debugLog('Submit response error', await submitResponse.text());
+      throw new Error(`Failed to submit results: ${submitResponse.status}`);
     }
+
+    const result = await submitResponse.json();
+    debugLog('Test completed successfully', result);
 
     return {
       downloadSpeed,
       uploadSpeed,
-      token: token,
-      testId
+      token,
+      testId: initData.test_id
     };
   } catch (error) {
     console.error('Speed test error:', error.message);
-    if (error.message.includes('401')) {
-      console.log('Token appears to be invalid, rotating to next token...');
-    }
+    debugLog('Full error', error);
     return null;
   }
 }
 
 // Main function with improved error handling
+// Update main function with better error handling
 async function main() {
   let currentAgent = null;
   let consecutiveFailures = 0;
@@ -389,7 +438,9 @@ async function main() {
         consecutiveFailures = 0;
       }
       
+      console.log('\nStarting new speed test cycle...');
       const speedTestResult = await performSpeedTest(currentAgent);
+      
       if (speedTestResult) {
         console.log(`
 Speed Test Results:
@@ -406,7 +457,7 @@ Speed Test Results:
         
         if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
           console.log('Too many consecutive failures. Waiting for 5 minutes before retrying...');
-          await new Promise(resolve => setTimeout(resolve, 300000)); // 5 minutes
+          await new Promise(resolve => setTimeout(resolve, 300000));
           consecutiveFailures = 0;
         }
       }
@@ -417,6 +468,7 @@ Speed Test Results:
       consecutiveFailures++;
     }
     
+    console.log(`Waiting ${config.checkInterval/1000} seconds before next test...`);
     await new Promise(resolve => setTimeout(resolve, config.checkInterval));
   }
 }
