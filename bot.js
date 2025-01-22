@@ -20,7 +20,7 @@ const banner = `
 Initializing system components...
 `;
 
-// Single configuration object
+// Configuration
 const config = {
   token: "",
   baseUrl: "https://app.despeed.net",
@@ -44,69 +44,75 @@ const config = {
   security: {
     userAgents: [
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0"
     ],
     headers: {
       'Accept-Language': 'en-US,en;q=0.9',
-      'Cache-Control': 'max-age=0'
+      'Cache-Control': 'max-age=0',
+      'Connection': 'keep-alive'
     }
   }
 };
 
-// Enhanced proxy parsing with better validation
+// Parse proxy with special format
 function parseProxyString(proxyStr) {
-  const proxyRegex = /^(http|socks):\/\/([^:]+):([^@]+)@([^:]+):(\d+)$/;
-  const match = proxyStr.match(proxyRegex);
-  
-  if (!match) {
-    console.warn(`Invalid proxy format: ${proxyStr}`);
+  try {
+    // Format: protocol://username-session-sessionId-duration-durationValue:password@host:port
+    const proxyRegex = /^(http|socks):\/\/([^-]+)-session-([^-]+)-duration-(\d+):([^@]+)@([^:]+):(\d+)$/;
+    const match = proxyStr.match(proxyRegex);
+    
+    if (!match) {
+      console.warn('Invalid proxy format:', proxyStr);
+      return null;
+    }
+
+    const [_, protocol, username, sessionId, duration, password, host, port] = match;
+    
+    return {
+      type: protocol.toLowerCase(),
+      host,
+      port: parseInt(port),
+      username: `${username}-session-${sessionId}-duration-${duration}`,
+      password,
+      sessionId,
+      duration: parseInt(duration)
+    };
+  } catch (error) {
+    console.error('Error parsing proxy:', error.message);
     return null;
   }
-
-  const [_, protocol, username, password, host, port] = match;
-  
-  return {
-    type: protocol.toLowerCase(),
-    host,
-    port: parseInt(port),
-    username,
-    password
-  };
 }
 
-// Enhanced proxy agent creation with better error handling
+// Create proxy agent
 async function createProxyAgent(proxyConfig) {
   try {
-    const auth = `${encodeURIComponent(proxyConfig.username)}:${encodeURIComponent(proxyConfig.password)}`;
-    const proxyUrl = `${proxyConfig.type}://${auth}@${proxyConfig.host}:${proxyConfig.port}`;
+    const proxyUrl = `${proxyConfig.type}://${encodeURIComponent(proxyConfig.username)}:${encodeURIComponent(proxyConfig.password)}@${proxyConfig.host}:${proxyConfig.port}`;
     
-    const agentOptions = {
-      proxy: proxyUrl,
-      timeout: config.proxy.timeout,
-      keepAlive: true
-    };
+    console.log(`Creating proxy agent for: ${proxyConfig.host}:${proxyConfig.port}`);
 
     return proxyConfig.type === 'http' 
-      ? new HttpsProxyAgent(agentOptions)
-      : new SocksProxyAgent(agentOptions);
+      ? new HttpsProxyAgent(proxyUrl)
+      : new SocksProxyAgent(proxyUrl);
   } catch (error) {
     console.error(`Failed to create proxy agent: ${error.message}`);
     return null;
   }
 }
 
-// Improved proxy validation with retries
+// Validate proxy
 async function validateProxy(agent, proxyConfig) {
   for (let attempt = 1; attempt <= config.proxy.maxRetries; attempt++) {
     try {
       console.log(`Testing proxy ${proxyConfig.host} (Attempt ${attempt}/${config.proxy.maxRetries})`);
       
       const response = await fetch(config.proxy.testUrl, {
-        agent,
-        timeout: config.proxy.timeout,
+        agent: agent,
         headers: {
-          'User-Agent': config.security.userAgents[Math.floor(Math.random() * config.security.userAgents.length)]
-        }
+          'User-Agent': config.security.userAgents[Math.floor(Math.random() * config.security.userAgents.length)],
+          ...config.security.headers
+        },
+        timeout: config.proxy.timeout
       });
 
       if (response.ok) {
@@ -125,7 +131,7 @@ async function validateProxy(agent, proxyConfig) {
   return false;
 }
 
-// Enhanced proxy rotation with validation
+// Rotate to next valid proxy
 async function rotateToNextValidProxy() {
   const startIndex = config.proxy.currentProxyIndex;
   let attempts = 0;
@@ -147,14 +153,15 @@ async function rotateToNextValidProxy() {
   throw new Error('No valid proxies found after checking all available proxies');
 }
 
-// Improved speed test with better error handling
+// Perform speed test
 async function performSpeedTest(agent) {
   try {
     const response = await fetch(`${config.baseUrl}/api/speedtest`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        ...config.security.headers
+        ...config.security.headers,
+        'User-Agent': config.security.userAgents[Math.floor(Math.random() * config.security.userAgents.length)]
       },
       agent,
       body: JSON.stringify({
@@ -168,14 +175,18 @@ async function performSpeedTest(agent) {
       throw new Error(`Speed test failed with status: ${response.status}`);
     }
 
-    return await response.json();
+    const result = await response.json();
+    return {
+      downloadSpeed: result.download,
+      uploadSpeed: result.upload
+    };
   } catch (error) {
     console.error('Speed test error:', error.message);
     return null;
   }
 }
 
-// Enhanced initialization
+// Initialize configuration
 async function initConfig() {
   try {
     console.log('Loading proxy configuration...');
@@ -210,7 +221,7 @@ async function initConfig() {
   }
 }
 
-// Enhanced main loop
+// Main function
 async function main() {
   let currentAgent = null;
   
@@ -222,7 +233,7 @@ async function main() {
       
       const speedTestResult = await performSpeedTest(currentAgent);
       if (speedTestResult) {
-        console.log(`Speed test results - Download: ${speedTestResult.download}Mbps, Upload: ${speedTestResult.upload}Mbps`);
+        console.log(`Speed test results - Download: ${speedTestResult.downloadSpeed}Mbps, Upload: ${speedTestResult.uploadSpeed}Mbps`);
       } else {
         console.log('Speed test failed, rotating proxy...');
         currentAgent = null;
@@ -237,7 +248,7 @@ async function main() {
   }
 }
 
-// Startup sequence
+// Start the application
 console.clear();
 console.log(banner);
 
