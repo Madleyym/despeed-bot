@@ -4,9 +4,11 @@ const HttpsProxyAgent = require('https-proxy-agent');
 const { SocksProxyAgent } = require('socks-proxy-agent');
 const fs = require('fs').promises;
 const path = require('path');
+const punycode = require('punycode/');
 
 // Define the banner
 const banner = `
+
 ╔══════════════════════════════════════════════════════╗
 ║                    MAD-JR SPEED                      ║
 ║                Network Speed Tester                  ║
@@ -88,43 +90,24 @@ async function loadTokens() {
   }
 }
 
-// Function to get the next token
-function getNextToken() {
-  if (config.tokens.length === 0) return null;
-  const token = config.tokens[config.currentTokenIndex];
-  config.currentTokenIndex = (config.currentTokenIndex + 1) % config.tokens.length;
-  return token;
-}
-
-// Parse proxy with special format
-function parseProxyString(proxyStr) {
+// Function to load proxies from file
+async function loadProxies() {
   try {
-    const proxyRegex = /^(http|socks):\/\/([^-]+)-session-([^-]+)-duration-(\d+):([^@]+)@([^:]+):(\d+)$/;
-    const match = proxyStr.match(proxyRegex);
+    const content = await fs.readFile(config.proxy.proxyFile, 'utf8');
+    config.proxy.proxyList = content
+      .split('\n')
+      .map(line => line.trim())
+      .filter(line => line && !line.startsWith('#'));
 
-    if (!match) {
-      console.warn('Invalid proxy format:', proxyStr);
-      return null;
-    }
-
-    const [_, protocol, username, sessionId, duration, password, host, port] = match;
-
-    return {
-      type: protocol.toLowerCase(),
-      host,
-      port: parseInt(port),
-      username: `${username}-session-${sessionId}-duration-${duration}`,
-      password,
-      sessionId,
-      duration: parseInt(duration)
-    };
+    console.log(`Successfully loaded ${config.proxy.proxyList.length} proxies`);
+    return config.proxy.proxyList.length > 0;
   } catch (error) {
-    console.error('Error parsing proxy:', error.message);
-    return null;
+    console.error('Error loading proxies:', error.message);
+    return false;
   }
 }
 
-// Create proxy agent
+// Function to create proxy agent
 async function createProxyAgent(proxyConfig) {
   try {
     const proxyUrl = `${proxyConfig.type}://${encodeURIComponent(proxyConfig.username)}:${encodeURIComponent(proxyConfig.password)}@${proxyConfig.host}:${proxyConfig.port}`;
@@ -140,124 +123,13 @@ async function createProxyAgent(proxyConfig) {
   }
 }
 
-// Validate proxy
-async function validateProxy(agent, proxyConfig) {
-  for (let attempt = 1; attempt <= config.proxy.maxRetries; attempt++) {
-    try {
-      console.log(`Testing proxy ${proxyConfig.host} (Attempt ${attempt}/${config.proxy.maxRetries})`);
-
-      const response = await fetch(config.proxy.testUrl, {
-        agent: agent,
-        headers: {
-          'User-Agent': config.security.userAgents[Math.floor(Math.random() * config.security.userAgents.length)],
-          ...config.security.headers
-        },
-        timeout: config.proxy.timeout
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        console.log(`Proxy ${proxyConfig.host} validated successfully (IP: ${data.ip})`);
-        return true;
-      }
-    } catch (error) {
-      console.warn(`Proxy validation attempt ${attempt} failed:`, error.message);
-      if (attempt < config.proxy.maxRetries) {
-        await new Promise(resolve => setTimeout(resolve, config.proxy.retryDelay));
-      }
-    }
-  }
-
-  return false;
-}
-
-// Perform speed test
-async function performSpeedTest(agent) {
-  const token = getNextToken();
-  if (!token) {
-    console.error('No valid token available');
-    return null;
-  }
-
-  try {
-    debugLog('Starting speed test with token', token.substring(0, 10) + '...');
-
-    // Fetch server list
-    const serverListResponse = await fetch(`${config.baseUrl}${config.apiPath}/servers`, {
-      method: 'GET',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        ...config.security.headers,
-        'User-Agent': config.security.userAgents[Math.floor(Math.random() * config.security.userAgents.length)]
-      },
-      agent
-    });
-
-    if (!serverListResponse.ok) {
-      throw new Error(`Failed to fetch server list: ${serverListResponse.status}`);
-    }
-
-    const servers = await serverListResponse.json();
-    const selectedServer = servers[0];
-
-    // Initialize speed test
-    const initResponse = await fetch(`${config.baseUrl}${config.apiPath}/test/init`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${token}`,
-        ...config.security.headers,
-        'User-Agent': config.security.userAgents[Math.floor(Math.random() * config.security.userAgents.length)]
-      },
-      agent,
-      body: JSON.stringify({
-        server_id: selectedServer.id,
-        latitude: config.location.latitude,
-        longitude: config.location.longitude
-      })
-    });
-
-    if (!initResponse.ok) {
-      throw new Error(`Test initialization failed: ${initResponse.status}`);
-    }
-
-    const initData = await initResponse.json();
-
-    // Simulate speed test results
-    const downloadSpeed = Math.floor(Math.random() * (100 - 50 + 1)) + 50;
-    const uploadSpeed = Math.floor(Math.random() * (50 - 20 + 1)) + 20;
-
-    // Submit results
-    const submitResponse = await fetch(`${config.baseUrl}${config.apiPath}/test/submit`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${token}`,
-        ...config.security.headers,
-        'User-Agent': config.security.userAgents[Math.floor(Math.random() * config.security.userAgents.length)]
-      },
-      agent,
-      body: JSON.stringify({
-        test_id: initData.test_id,
-        download_speed: downloadSpeed,
-        upload_speed: uploadSpeed,
-        ping: Math.floor(Math.random() * 50) + 10,
-        jitter: Math.floor(Math.random() * 10) + 1,
-        timestamp: new Date().toISOString()
-      })
-    });
-
-    if (!submitResponse.ok) {
-      throw new Error(`Failed to submit test results: ${submitResponse.status}`);
-    }
-
-    const resultData = await submitResponse.json();
-    console.log('Speed test completed:', resultData);
-    return resultData;
-  } catch (error) {
-    console.error('Speed test error:', error.message);
-    return null;
-  }
+// Function to get the next token
+function getNextToken() {
+  if (config.tokens.length === 0) return null;
+  const token = config.tokens[config.currentTokenIndex];
+  config.currentTokenIndex = (config.currentTokenIndex + 1) % config.tokens.length;
+  console.log(`Using token: ${token}`);
+  return token;
 }
 
 // Main function
@@ -269,13 +141,23 @@ async function performSpeedTest(agent) {
     return;
   }
 
+  if (!(await loadProxies())) {
+    console.error('Failed to load proxies. Exiting.');
+    return;
+  }
+
+  console.log(`Connected with token ID: ${getNextToken()}`);
   while (true) {
     const proxyConfig = parseProxyString(config.proxy.proxyList[config.proxy.currentProxyIndex]);
 
     if (proxyConfig) {
       const agent = await createProxyAgent(proxyConfig);
-      if (agent && await validateProxy(agent, proxyConfig)) {
-        await performSpeedTest(agent);
+      if (agent) {
+        console.log(`Proxy ${proxyConfig.host} is ready to use.`);
+        await fetch(config.proxy.testUrl, { agent })
+          .then(res => res.json())
+          .then(data => console.log(`Speed test IP: ${data.ip}`))
+          .catch(err => console.error('Speed test failed:', err.message));
       }
     }
 
