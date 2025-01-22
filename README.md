@@ -60,7 +60,7 @@ Register [here](https://app.despeed.net/register?ref=15UZoaSGy0F3).
    ```
 4. **Install dependencies**:
    ```bash
-   npm install
+   npm install node-fetch https-proxy-agent socks-proxy-agent ws uuid
    ```
    If the installation is slow, use a mirror:
    ```bash
